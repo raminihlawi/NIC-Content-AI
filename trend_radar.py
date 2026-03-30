@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import textwrap
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -22,7 +23,6 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 
-REDDIT_URL = "https://www.reddit.com/r/cybersecurity/top.json?t=week"
 USER_AGENT = "NIC-Trend-Radar/1.0 (+https://www.nord-ic.com)"
 DEFAULT_LIMIT = 15
 DEFAULT_KEYWORDS = [
@@ -47,6 +47,19 @@ DEFAULT_KEYWORDS = [
     "informationssäkerhet",
     "klassificering",
     "classification",
+    "digital sovereignty",
+    "digital sovereign",
+    "cybersäkerhetslagen",
+    "csl",
+]
+DEFAULT_REDDIT_SOURCES = [
+    ("Reddit r/cybersecurity", "https://www.reddit.com/r/cybersecurity/top.json?t=week"),
+    ("Reddit r/buyfromEU", "https://www.reddit.com/r/buyfromEU/top.json?t=week"),
+    ("Reddit r/degoogle", "https://www.reddit.com/r/degoogle/top.json?t=week"),
+    ("Reddit r/eutech", "https://www.reddit.com/r/eutech/top.json?t=week"),
+    ("Reddit r/europe", "https://www.reddit.com/r/europe/top.json?t=week"),
+    ("Reddit r/technology", "https://www.reddit.com/r/technology/top.json?t=week"),
+    ("Reddit r/technews", "https://www.reddit.com/r/technews/top.json?t=week"),
 ]
 DEFAULT_RSS_SOURCES = [
     ("CERT-SE", "https://www.cert.se/feed.rss"),
@@ -85,6 +98,40 @@ SOURCE_BONUS = {
     "UK NCSC Blog": 14,
     "UK NCSC Threat Reports": 14,
     "NSM Alerts": 20,
+    "Reddit r/cybersecurity": 8,
+    "Reddit r/buyfromEU": 6,
+    "Reddit r/degoogle": 6,
+    "Reddit r/eutech": 7,
+    "Reddit r/europe": 4,
+    "Reddit r/technology": 4,
+    "Reddit r/technews": 4,
+}
+KEYWORD_WEIGHTS = {
+    "nis2": 30,
+    "dora": 30,
+    "ai act": 28,
+    "gdpr": 26,
+    "digital sovereignty": 26,
+    "digital sovereign": 24,
+    "cybersäkerhetslagen": 28,
+    "csl": 24,
+    "compliance": 18,
+    "regulation": 16,
+    "förordning": 16,
+    "forordning": 16,
+    "governance": 14,
+    "audit": 14,
+    "security control": 14,
+    "framework": 12,
+    "classification": 12,
+    "klassificering": 12,
+    "information security": 12,
+    "informationssäkerhet": 12,
+    "cybersäkerhet": 10,
+    "cybersikkerhet": 10,
+    "resilience": 6,
+    "resiliens": 6,
+    "risk": 2,
 }
 
 
@@ -136,7 +183,7 @@ class LinkExtractor(HTMLParser):
 
 
 def fetch_reddit_posts(
-    url: str = REDDIT_URL,
+    url: str,
     limit: int = 25,
     timeout: int = 15,
 ) -> list[dict]:
@@ -259,7 +306,16 @@ def find_matching_keywords(text: str, keywords: Iterable[str]) -> list[str]:
 
 
 def score_item(base_score: int, matched_keywords: list[str]) -> int:
-    return base_score + len(matched_keywords) * 10
+    keyword_score = sum(KEYWORD_WEIGHTS.get(keyword.lower(), 10) for keyword in matched_keywords)
+    return base_score + keyword_score
+
+
+def normalize_base_score(source: str, base_score: int) -> int:
+    if source.startswith("Reddit "):
+        if base_score <= 0:
+            return 0
+        return min(80, int(math.log10(base_score + 1) * 20))
+    return base_score
 
 
 def build_trend_items(
@@ -271,7 +327,8 @@ def build_trend_items(
     for record in records:
         title = record.get("title", "").strip()
         url = record.get("url", "").strip()
-        base_score = int(record.get("ups", 0) or 0)
+        raw_base_score = int(record.get("ups", 0) or 0)
+        base_score = normalize_base_score(source, raw_base_score)
         matched_keywords = find_matching_keywords(title, keywords)
         if not matched_keywords:
             continue
@@ -398,7 +455,7 @@ def safe_fetch(fetcher, *args, **kwargs) -> FetchResult:
 
 
 def default_sources() -> list[FeedSource]:
-    sources = [FeedSource("Reddit", REDDIT_URL, "reddit")]
+    sources = [FeedSource(name, url, "reddit") for name, url in DEFAULT_REDDIT_SOURCES]
     sources.extend(FeedSource(name, url, "rss") for name, url in DEFAULT_RSS_SOURCES)
     sources.extend(FeedSource(name, url, "html") for name, url in DEFAULT_HTML_SOURCES)
     sources.extend(FeedSource(name, url, "json") for name, url in DEFAULT_JSON_SOURCES)
