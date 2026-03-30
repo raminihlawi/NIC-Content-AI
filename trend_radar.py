@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import textwrap
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -133,6 +134,31 @@ KEYWORD_WEIGHTS = {
     "resiliens": 6,
     "risk": 2,
 }
+RISK_CONTEXT_TERMS = [
+    "cyber",
+    "security",
+    "cybersäkerhet",
+    "cybersikkerhet",
+    "information security",
+    "informationssäkerhet",
+    "compliance",
+    "governance",
+    "nis2",
+    "dora",
+    "gdpr",
+    "ai",
+    "ai act",
+    "audit",
+    "framework",
+    "control",
+    "policy",
+    "resilience",
+    "resiliens",
+    "digital sovereignty",
+    "csl",
+    "cybersäkerhetslagen",
+    "supply chain",
+]
 
 
 @dataclass
@@ -302,7 +328,18 @@ def fetch_json_headlines(url: str, timeout: int = 15) -> list[dict]:
 
 def find_matching_keywords(text: str, keywords: Iterable[str]) -> list[str]:
     normalized = text.lower()
-    return [keyword for keyword in keywords if keyword.lower() in normalized]
+    normalized_padded = f" {normalized} "
+    matches = [keyword for keyword in keywords if keyword.lower() in normalized]
+    if "risk" in {match.lower() for match in matches}:
+        has_context = any(term_matches(normalized_padded, term.lower()) for term in RISK_CONTEXT_TERMS)
+        if not has_context:
+            matches = [match for match in matches if match.lower() != "risk"]
+    return matches
+
+
+def term_matches(normalized_text: str, term: str) -> bool:
+    pattern = r"(?<!\w)" + re.escape(term) + r"(?!\w)"
+    return re.search(pattern, normalized_text) is not None
 
 
 def score_item(base_score: int, matched_keywords: list[str]) -> int:
