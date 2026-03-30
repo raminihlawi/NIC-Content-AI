@@ -14,7 +14,10 @@ import json
 import textwrap
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from html import unescape
+from html.parser import HTMLParser
 from typing import Iterable
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -32,11 +35,24 @@ DEFAULT_KEYWORDS = [
     "security control",
     "gdpr",
     "regulation",
+    "förordning",
+    "forordning",
     "governance",
     "risk",
     "resilience",
+    "resiliens",
+    "cybersäkerhet",
+    "cybersikkerhet",
+    "information security",
+    "informationssäkerhet",
+    "klassificering",
+    "classification",
 ]
 DEFAULT_RSS_SOURCES = [
+    ("CERT-SE", "https://www.cert.se/feed.rss"),
+    ("UK NCSC News", "https://www.ncsc.gov.uk/api/1/services/v1/news-rss-feed.xml"),
+    ("UK NCSC Blog", "https://www.ncsc.gov.uk/api/1/services/v1/blog-post-rss-feed.xml"),
+    ("UK NCSC Threat Reports", "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml"),
     ("NIST Cybersecurity", "https://www.nist.gov/news-events/cybersecurity/rss.xml"),
     (
         "NIST Cybersecurity Insights",
@@ -45,6 +61,11 @@ DEFAULT_RSS_SOURCES = [
     ("BleepingComputer", "https://www.bleepingcomputer.com/feed/"),
     ("The Record", "https://therecord.media/feed"),
     ("SecurityWeek", "https://www.securityweek.com/feed/"),
+]
+DEFAULT_HTML_SOURCES = [
+    ("ENISA News", "https://www.enisa.europa.eu/news"),
+    ("NCSC Netherlands News", "https://english.ncsc.nl/"),
+    ("NSM Alerts", "https://nsm.no/fagomrader/digital-sikkerhet/nasjonalt-cybersikkerhetssenter/varsler-fra-nsm/"),
 ]
 DEFAULT_JSON_SOURCES = [
     (
@@ -56,6 +77,15 @@ DEFAULT_JSON_SOURCES = [
         "https://api.msrc.microsoft.com/update-guide/rss",
     ),
 ]
+SOURCE_BONUS = {
+    "ENISA News": 20,
+    "CERT-SE": 25,
+    "NCSC Netherlands News": 20,
+    "UK NCSC News": 18,
+    "UK NCSC Blog": 14,
+    "UK NCSC Threat Reports": 14,
+    "NSM Alerts": 20,
+}
 
 
 @dataclass
@@ -78,6 +108,31 @@ class FeedSource:
     name: str
     url: str
     kind: str
+
+
+class LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self._href = dict(attrs).get("href")
+            self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._href is not None:
+            text = unescape(" ".join(part.strip() for part in self._text_parts)).strip()
+            if text:
+                self.links.append((self._href, " ".join(text.split())))
+            self._href = None
+            self._text_parts = []
 
 
 def fetch_reddit_posts(
@@ -118,6 +173,48 @@ def fetch_rss_headlines(url: str, timeout: int = 15) -> list[dict]:
         if title and link:
             items.append({"title": title, "url": link, "ups": 0})
     return items
+
+
+def fetch_html_headlines(url: str, timeout: int = 15) -> list[dict]:
+    headers = {"User-Agent": USER_AGENT}
+    response = requests.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+
+    parser = LinkExtractor()
+    parser.feed(response.text)
+    domain = urlparse(url).netloc
+
+    items = []
+    seen: set[tuple[str, str]] = set()
+    for href, title in parser.links:
+        link = urljoin(url, href)
+        if not title or len(title) < 24:
+            continue
+        if urlparse(link).netloc and urlparse(link).netloc != domain:
+            continue
+        lowered = title.lower()
+        if any(
+            noise in lowered
+            for noise in (
+                "kontakt",
+                "cookies",
+                "privacy",
+                "linkedin",
+                "facebook",
+                "instagram",
+                "rss",
+                "sitemap",
+                "report vulnerability",
+                "go to content",
+            )
+        ):
+            continue
+        key = (title, link)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"title": title, "url": link, "ups": 0})
+    return items[:50]
 
 
 def fetch_json_headlines(url: str, timeout: int = 15) -> list[dict]:
@@ -184,7 +281,7 @@ def build_trend_items(
                 source=source,
                 title=title,
                 url=url,
-                score=score_item(base_score, matched_keywords),
+                score=score_item(base_score, matched_keywords) + SOURCE_BONUS.get(source, 0),
                 matched_keywords=matched_keywords,
             )
         )
@@ -303,6 +400,7 @@ def safe_fetch(fetcher, *args, **kwargs) -> FetchResult:
 def default_sources() -> list[FeedSource]:
     sources = [FeedSource("Reddit", REDDIT_URL, "reddit")]
     sources.extend(FeedSource(name, url, "rss") for name, url in DEFAULT_RSS_SOURCES)
+    sources.extend(FeedSource(name, url, "html") for name, url in DEFAULT_HTML_SOURCES)
     sources.extend(FeedSource(name, url, "json") for name, url in DEFAULT_JSON_SOURCES)
     return sources
 
@@ -347,6 +445,8 @@ def main() -> None:
             result = safe_fetch(fetch_reddit_posts, url=source.url, limit=args.reddit_limit)
         elif source.kind == "rss":
             result = safe_fetch(fetch_rss_headlines, source.url)
+        elif source.kind == "html":
+            result = safe_fetch(fetch_html_headlines, source.url)
         else:
             result = safe_fetch(fetch_json_headlines, source.url)
 
